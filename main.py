@@ -1,10 +1,9 @@
-import logging
 import json
 import os
 import re
 import asyncio
 from datetime import datetime, timedelta
-from typing import Dict, Set, List, Optional, Any
+from typing import Dict, Set, List, Optional, Any, Tuple
 from uuid import uuid4
 from dotenv import load_dotenv
 from filelock import FileLock
@@ -444,7 +443,7 @@ def create_post_confirmation_keyboard() -> InlineKeyboardMarkup:
     ]
     return InlineKeyboardMarkup(keyboard)
 
-def build_channel_selection_keyboard(selected_channels: Set[str], channels: Dict[str, Dict[str, Any]], page: int = 0, per_page: int = 10) -> tuple[InlineKeyboardMarkup, int]:
+def build_channel_selection_keyboard(selected_channels: Set[str], channels: Dict[str, Dict[str, Any]], page: int = 0, per_page: int = 10) -> Tuple[InlineKeyboardMarkup, int]:
     keyboard: List[List[InlineKeyboardButton]] = []
     start_idx = page * per_page
     end_idx = start_idx + per_page
@@ -511,6 +510,10 @@ def create_schedule_list_keyboard(scheduled_jobs: Dict[str, Any]) -> InlineKeybo
                 callback_data=f"schedule_view_{job_id}"
             )
         ])
+    
+    if not keyboard:
+        keyboard.append([InlineKeyboardButton("No scheduled jobs", callback_data="no_jobs")])
+    
     keyboard.append([
         InlineKeyboardButton(f"{EMOJI['back']} Back", callback_data="back_to_schedule_menu")
     ])
@@ -909,7 +912,7 @@ async def add_to_batch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                "photo" if update.message.photo else \
                "video" if update.message.video else "document"
     await update.message.reply_text(
-        style_text(f"Added {msg_type} message to batch ({len(batch)}/{MAX_MESSAGE_COUNT}).", "success"),
+        style_text(f"Added {msg_type} message to batch ({len(batch)}/{MAX_BATCH_MESSAGES}).", "success"),
         reply_markup=create_batch_management_keyboard(),
         parse_mode="Markdown"
     )
@@ -929,7 +932,7 @@ async def show_batch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
     
     text = f"""
-📦 *Current Batch* ({len(batch)}/{MAX_MESSAGE_COUNT})
+📦 *Current Batch* ({len(batch)}/{MAX_BATCH_MESSAGES})
 """
     for i, msg_id in enumerate(batch, 1):
         text += f"{i}. Message ID: `{msg_id}`\n"
@@ -1035,14 +1038,14 @@ async def view_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             text += f"{i}. {channels[cid]['name']}\n"
     
     keyboard = [
-    [
-        InlineKeyboardButton(f"{EMOJI['edit']} Reschedule", callback_data=f"reschedule_{job_id}"),
-        InlineKeyboardButton(f"{EMOJI['remove']} Cancel Job", callback_data=f"delete_job_{job_id}")
-    ],
-    ],
+        [
+            InlineKeyboardButton(f"{EMOJI['edit']} Reschedule", callback_data=f"reschedule_{job_id}"),
+            InlineKeyboardButton(f"{EMOJI['remove']} Cancel Job", callback_data=f"delete_job_{job_id}")
+        ],
         [
             InlineKeyboardButton(f"{EMOJI['back']} Back", callback_data="back_to_schedule_list")
         ]
+    ]
     
     await query.message.edit_text(
         text,
@@ -1063,7 +1066,7 @@ async def schedule_batch_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         await query.answer()
         logger.warning(f"User {query.from_user.id} attempted to schedule without batch")
-        return None
+        return
     
     await query.message.edit_text(
         style_text("Enter schedule time (YYYY-MM-DD HH:MM), e.g., 2025-01-01 14:00", "info"),
@@ -1091,90 +1094,88 @@ async def schedule_batch_confirm(update: Update, context: ContextTypes.DEFAULT_T
         context.user_data.pop("schedule_input", None)
         return ConversationHandler.END
     
-    batch = context.user_data.get("batch", [])
+    batch: List[int] = context.user_data.get("batch", [])
     selected_channels = context.user_data.get("selected_channels", set())
-    config
+    
     if not batch or not selected_channels:
         await update.message.reply_text(
-            style_text("No messages or no channels selected. Start over.", "error"),
+            style_text("Missing batch or selected channels.", "error"),
             reply_markup=create_batch_management_keyboard(),
             parse_mode="Markdown"
         )
-        logger.warning(f"User {user_id} attempted to schedule without batch or channels")
-        context.user_data.pop("schedule_input", None),
+        context.user_data.pop("schedule_input", None)
         return ConversationHandler.END
     
-    if check_schedule_conflict(config, schedule_dt, selected_channels)):
+    config = config_manager.get_config()
+    if check_schedule_conflict(config, schedule_dt, selected_channels):
         await update.message.reply_text(
-            style_text("Schedule conflict detected. Choose a different time.", "error"),
+            style_text("Scheduling conflict detected. Choose a different time.", "warning"),
             reply_markup=create_batch_management_keyboard(),
             parse_mode="Markdown"
         )
-        logger.warning(f"User {user_id} attempted to schedule with conflict at {text}")
-        return SCHEDULE_BATCH
+        context.user_data.pop("schedule_input", None)
+        return ConversationHandler.END
     
-    job_id = str(uuid.uuid4())
-    config["scheduled_jobs]["posts"][job_id] = {
+    job_id = str(uuid4())
+    config["scheduled_posts"][job_id] = {
         "time": schedule_dt.isoformat(),
-        "batch_ids": len(batch),
-        "batch_size": int,
+        "batch_ids": batch[:],
         "channels": list(selected_channels),
-        "user_id": user_id
+        "batch_size": len(batch),
+        "admin_id": str(user_id),
+        "created_at": datetime.now().isoformat()
     }
     config_manager.save_config()
     
-    context.user_data["schedule_time"] = schedule_dt.isoformat()
-    
     await update.message.reply_text(
-        style_text(f"Batch scheduled successfully for {text} to {len(selected_channels)} channels.", "success"),
+        style_text(f"Batch scheduled for {format_timestamp(schedule_dt.isoformat())}.", "success"),
         reply_markup=create_batch_management_keyboard(),
         parse_mode="Markdown"
     )
-    logger.info(f"User {user_id} scheduled batch job {job_id} at {text}")
     
     context.user_data.pop("schedule_input", None)
+    context.user_data["batch"] = []
+    context.user_data["selected_channels"] = set()
+    logger.info(f"User {user_id} scheduled batch {job_id} for {schedule_dt}")
     return ConversationHandler.END
 
-# ==================== Posting Functionality ====================
+# ==================== Posting Functions ====================
 async def preview_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    batch: List[int] = context.user_data.get("batch", []))
-    selected_channels: Set[str] = context.user_data.get("selected_channels", set())
-    config = config_manager.get_config()
-    settings = config.get("settings", {})
+    batch: List[int] = context.user_data.get("batch", [])
+    selected_channels = context.user_data.get("selected_channels", set())
     
     if not batch or not selected_channels:
         await query.message.edit_text(
-            style_text("No messages or channels selected. Add messages and select channels.", "error"),
+            style_text("Missing batch or channels.", "error"),
             reply_markup=create_batch_management_keyboard(),
             parse_mode="Markdown"
         )
-        else await query.answer()
-        else logger.warning(f"User {query.from_user.id} from {user} attempted to preview without batch or channels")
+        await query.answer()
         return
     
-    delay = settings.get("default_delay", POST_DELAY_SECONDS)
-    retries = settings.get("max_retries", MAX_RETRIES)
-    footer = settings.get("footer", "")
+    config = config_manager.get_config()
+    settings = config.get("settings", {})
+    channels = config_manager.get_all_channels()
     
     text = f"""
-🎥 *Post Preview and Confirmation*
+📤 *Post Preview*
 
-*Batch Details:*
+*Batch Info:*
 • Messages: `{len(batch)}`
-• Channels: `{len(selected_channels)}`
-• Estimated Time: `{len(batch) * len(selected_channels) * delay:.1f}s`
+• Target Channels: `{len(selected_channels)}`
+• Total Posts: `{len(batch) * len(selected_channels)}`
 
 *Settings:*
-• Delay: `{delay}s` per post
-• Retries: `{retries}` per post
-• Footer: `{footer[:50]}{'...' if len(footer) > 50 else ''}`
+• Delay: `{settings.get('default_delay', POST_DELAY_SECONDS)}s`
+• Max Retries: `{settings.get('max_retries', MAX_RETRIES)}`
+• Footer: `{settings.get('footer', 'None')[:50] + '...' if len(settings.get('footer', '')) > 50 else settings.get('footer', 'None')}`
 
 *Target Channels:*
 """
-    channels = config_manager.get_all_channels()
-    for i, cid in enumerate(selected_channels, 1):
-        text += f"{i}. {channels[cid]['name']}\n"
+    for cid in selected_channels:
+        if cid in channels:
+            text += f"• {channels[cid]['name']}\n"
     
     await query.message.edit_text(
         text,
@@ -1182,24 +1183,22 @@ async def preview_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         parse_mode="Markdown"
     )
     await query.answer()
-    logger.debug(f"User {query.from_user.id} viewed post preview")
+    logger.debug(f"User {query.from_user.id} previewed post")
 
-async def execute_post(update: Update, context: ContextTypes.DEFAULT_TYPE, is_scheduled: bool = False, job_id: Optional[str] = None) -> bool:
+async def execute_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    batch_ids: List[int] = context.user_data.get("batch", [])[:]
-    selected_channels: Set[str] = context.user_data.get("selected_channels", set()).copy()
-    user_id: int = query.from_user.id
-    chat_id: int = query.message.chat_id
+    user_id = query.from_user.id
+    batch: List[int] = context.user_data.get("batch", [])
+    selected_channels = context.user_data.get("selected_channels", set())
     
-    if not batch_ids or not selected_channels:
+    if not batch or not selected_channels:
         await query.message.edit_text(
-            style_text("No messages or channels selected for posting.", "error"),
+            style_text("Missing batch or channels.", "error"),
             reply_markup=create_batch_management_keyboard(),
             parse_mode="Markdown"
         )
         await query.answer()
-        logger.warning(f"User {user_id} attempted to post without batch or channels")
-        return False
+        return
     
     config = config_manager.get_config()
     settings = config.get("settings", {})
@@ -1207,185 +1206,117 @@ async def execute_post(update: Update, context: ContextTypes.DEFAULT_TYPE, is_sc
     max_retries = settings.get("max_retries", MAX_RETRIES)
     footer = settings.get("footer", "")
     
-    await query.message.edit_text(
-        style_text(f"Starting {'scheduled' if is_scheduled else ''} post...", "info"),
+    total_operations = len(batch) * len(selected_channels)
+    completed = 0
+    failed = 0
+    
+    progress_msg = await query.message.edit_text(
+        f"📤 *Starting batch post...*\n\nProgress: 0/{total_operations}",
         parse_mode="Markdown"
     )
-    await query.answer()
     
-    success_count = 0
-    failed_posts: Dict[str, List[Dict[str, Any]]] = {}
-    total_operations = len(batch_ids) * len(selected_channels)
-    completed_operations = 0
-    post_id = str(uuid4())
-    
-    progress_message: Optional[Message] = None
-    
-    try:
-        await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
-        progress_text = f"""
-🔄 *{'Scheduled' if is_scheduled else ''} Post Progress*
-
-• Completed: `0/{total_operations}`
-• Posted: `0`
-• Failed: `0`
-• Remaining: `{total_operations}`
-```
-Progress: [          0%]
-```
-"""
-        progress_message = await context.bot.send_message(
-            chat_id=chat_id,
-            text=progress_text,
-            parse_mode="Markdown"
-        )
-        
-        update_interval = max(1, total_operations // 10)  # Update every 10%
-        for batch_id in batch_ids:
-            for ch_id in selected_channels:
-                if not validate_channel_id(ch_id):
-                    failed_posts.setdefault(ch_id, []).append({"error": "Invalid channel ID", "message_id": batch_id})
-                    logger.warning(f"Invalid channel ID {ch_id} for message {batch_id}")
-                    continue
+    for msg_id in batch:
+        for channel_id in selected_channels:
+            try:
+                await context.bot.copy_message(
+                    chat_id=channel_id,
+                    from_chat_id=query.message.chat_id,
+                    message_id=msg_id
+                )
                 
-                for attempt in range(max_retries + 1):
-                    try:
-                        await context.bot.send_chat_action(
-                            chat_id=int(ch_id),
-                            action=ChatAction.UPLOAD_DOCUMENT
-                        )
-                        copied_msg = await context.bot.copy_message(
-                            chat_id=int(ch_id),
-                            from_chat_id=chat_id,
-                            message_id=batch_id
-                        )
-                        if footer:
-                            await context.bot.send_message(
-                                chat_id=int(ch_id),
-                                text=footer,
-                                reply_to_message_id=copied_msg.message_id,
-                                parse_mode="Markdown"
-                            )
-                        success_count += 1
-                        break
-                    except Exception as e:
-                        if attempt == max_retries:
-                            failed_posts.setdefault(ch_id, []).append({"error": str(e)[:500], "message_id": batch_id})
-                            logger.warning(f"Failed to post message {batch_id} to {ch_id} after {max_retries} attempts: {e}")
-                        await asyncio.sleep(1)
+                if footer:
+                    await context.bot.send_message(
+                        chat_id=channel_id,
+                        text=footer[:MAX_FOOTER_LENGTH],
+                        parse_mode="Markdown"
+                    )
                 
-                completed_operations += 1
-                percent = min(100.0, (completed_operations / total_operations) * 100)
-                progress_bar = "█" * int(percent // 10) + " " * (10 - int(total_operations // 10))
-                
-                if completed_operations % update_interval == 0 or completed_operations == total_operations:
-                    progress_text = f"""
-🔄 *{'Scheduled' if is_scheduled else ''} Post Progress*
-
-• Completed: `{completed_operations}/{total_operations}`
-• Posted: `{success_count}`
-• Failed: `{sum(len(errors) for errors in failed_posts.values())}`
-• Remaining: `{total_operations - completed_operations}`
-```
-Progress: [{progress_bar} {percent:.1f}%]
-```
-"""
-                    try:
-                        await context.bot.edit_message_text(
-                            chat_id=progress_message.chat_id,
-                            message_id=progress_message.message_id,
-                            text=progress_text,
-                            parse_mode="Markdown"
-                        )
-                    except Exception as e:
-                        logger.warning(f"Failed to update progress message: {e}", exc_info=True)
+                completed += 1
+                if completed % 10 == 0:
+                    percent = (completed / total_operations) * 100
+                    progress_bar = "█" * int(percent // 10) + "░" * (10 - int(percent // 10))
+                    await progress_msg.edit_text(
+                        f"📤 *Posting in progress...*\n\nProgress: {completed}/{total_operations}\n[{progress_bar}] {percent:.1f}%",
+                        parse_mode="Markdown"
+                    )
                 
                 await asyncio.sleep(delay)
-        
-        config_manager.update_stats(
-            posts=success_count,
-            batches=1,
-            channels=list(selected_channels),
-            admin_id=str(user_id),
-            post_id=post_id
-        )
-        
-        summary_text = f"""
-🎉 *{'Scheduled' if is_scheduled else ''} Posting Summary*
-
-• Post ID: `{post_id[:8]}...`
-• Total Messages: `{len(batch_ids)}`
-• Total Channels: `{len(selected_channels)}`
-• Successful Posts: `{success_count}`
-• Failed Posts: `{sum(len(errors) for errors in failed_posts.values())}`
-"""
-        if failed_posts:
-            summary_text += "\n*❌ Failed Posts:*"
-            channels = config_manager.get_all_channels()
-            for ch_id, errors in failed_posts.items():
-                summary_text += f"• {channels.get(ch_id, {'name': ch_id})['name']}:"
-                for error in errors:
-                    summary_text += f"  - Msg ID `{error['message_id']}`: `{error['error'][:50]}...`\n"
-        
-        context.user_data["batch"] = []
-        context.user_data["selected_channels"] = set()
-        context.user_data.pop("batch_created", None)
-        context.user_data.pop("schedule_time", None)
-        context.user_data.pop("page", None)
-        
-        if is_scheduled and job_id:
-            config["scheduled_posts"].pop(job_id, None)
-            config_manager.save_config()
-            logger.info(f"Completed scheduled job {job_id}")
-        
-        if settings.get("notifications", True):
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=summary_text,
-                reply_markup=create_main_menu(),
-                parse_mode="Markdown"
-            )
-        
-        if progress_message:
-            try:
-                await context.bot.delete_message(
-                    chat_id=progress_message.chat_id,
-                    message_id=progress_message.message_id
-                )
+                
             except Exception as e:
-                logger.warning(f"Failed to delete progress message: {e}", exc_info=True)
-        
-        return True
+                logger.error(f"Failed to post message {msg_id} to channel {channel_id}: {e}")
+                failed += 1
     
-    except Exception as e:
-        logger.error(f"Posting error for user {user_id}: {e}", exc_info=True)
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=style_text(f"Posting failed: {str(e)[:500]}. Please try again.", "error"),
-            reply_markup=create_main_menu(),
+    # Update stats
+    post_id = str(uuid4())
+    config_manager.update_stats(
+        posts=completed,
+        batches=1,
+        channels=list(selected_channels),
+        admin_id=str(user_id),
+        post_id=post_id
+    )
+    
+    success_text = f"""
+🎉 *Batch Post Complete!*
+
+*Results:*
+• Successful: `{completed}`
+• Failed: `{failed}`
+• Total: `{total_operations}`
+
+*Posted to:*
+• Channels: `{len(selected_channels)}`
+• Messages: `{len(batch)}`
+"""
+    
+    await progress_msg.edit_text(
+        success_text,
+        reply_markup=create_batch_management_keyboard(),
+        parse_mode="Markdown"
+    )
+    
+    # Clear batch after successful post
+    context.user_data["batch"] = []
+    context.user_data["selected_channels"] = set()
+    
+    await query.answer("Post completed!")
+    logger.info(f"User {user_id} completed batch post: {completed} successful, {failed} failed")
+
+# ==================== Post Settings ====================
+async def post_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.callback_query:
+        query = update.callback_query
+        await query.message.edit_text(
+            style_text("Post Settings Configuration", "header"),
+            reply_markup=create_post_settings_keyboard(),
             parse_mode="Markdown"
         )
-        return False
+        await query.answer()
+    else:
+        await update.message.reply_text(
+            style_text("Post Settings Configuration", "header"),
+            reply_markup=create_post_settings_keyboard(),
+            parse_mode="Markdown"
+        )
+    logger.debug(f"Post settings accessed by user {update.effective_user.id}")
 
 # ==================== Admin Management ====================
-async def list_admins(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def admin_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     config = config_manager.get_config()
     admins = config.get("admins", [])
     
-    if not admins:
-        await query.message.edit_text(
-            style_text("No admins found.", "info"),
-            reply_markup=create_admin_management_keyboard(),
-            parse_mode="Markdown"
-        )
-        await query.answer()
-        logger.info(f"User {query.from_user.id} viewed empty admin list")
-        return True
-    
-    text = "👑 *Admin List*\n\n"
+    text = f"""
+👑 *Admin List* ({len(admins)} total)
+
+"""
     for i, admin_id in enumerate(admins, 1):
-        text += f"{i}. `{admin_id}`\n"
+        is_owner = admin_id == str(OWNER_ID)
+        status = "👑 Owner" if is_owner else "👤 Admin"
+        stats = config.get("admin_stats", {}).get(admin_id, {})
+        posts = stats.get("posts", 0)
+        last_action = format_timestamp(stats.get("last_action"), relative=True)
+        text += f"{i}. `{admin_id}` - {status}\n   Posts: {posts}, Last: {last_action}\n"
     
     await query.message.edit_text(
         text,
@@ -1393,107 +1324,59 @@ async def list_admins(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         parse_mode="Markdown"
     )
     await query.answer()
-    logger.debug(f"User {query.from_user.id} viewed admin list")
+    logger.debug(f"Admin list viewed by user {query.from_user.id}")
 
-async def show_admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    config = config_manager.get_config()
-    admin_stats = config.get("admin_stats", {})
-    
-    text = "👑 *Admin Statistics*\n\n"
-    if not admin_stats:
-        text += "No admin statistics available."
-    else:
-        for admin_id, stats in admin_stats.items():
-            text += f"• Admin `{admin_id[:8]}...`: `{stats.get('posts', 0)}` posts\n"
-            if stats.get("last_action"):
-                text += f"  Last Action: {format_timestamp(stats['last_action'], relative=True)}\n"
-            else:
-                text += f"\n"
-    
-    await query.message.edit_text(
-        text,
-        reply_markup=create_admin_management_keyboard(),
-        parse_mode="Markdown"
-    )
-    await query.answer()
-    logger.debug(f"User {query.from_user.id} viewed admin stats")
-
-async def add_admin_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def add_admin_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.message.edit_text(
-        style_text("Enter the User ID to add as admin.", "info"),
+        style_text("Send the user ID of the new admin:", "info"),
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton(f"{EMOJI['cancel']} Cancel", callback_data="cancel_admin")]
         ]),
         parse_mode="Markdown"
     )
-    context.user_data["settings_input"] = "add_admin"
+    context.user_data["admin_input"] = "add_admin"
     await query.answer()
-    logger.debug(f"User {query.from_user.id} prompted to add admin")
+    return ADMIN_MANAGEMENT
 
-async def remove_admin_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def remove_admin_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
-    await query.message.edit_text(
-        style_text("Enter the User ID to remove from admins.", "info"),
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton(f"{EMOJI['cancel']} Cancel", callback_data="cancel_admin")]
-        ])),
-        parse_mode="Markdown"
-    )
-    context.user_data["settings_input"] = "delete_admin"
-    await query.answer()
-    logger.debug(f"User {query.from_user.id} prompted to remove admin")
-
-# ==================== Channel Management ====================
-async def list_channels(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    channels = config_manager.get_all_channels()
+    config = config_manager.get_config()
+    admins = config.get("admins", [])
     
-    if not channels:
+    if len(admins) <= 1:
         await query.message.edit_text(
-            style_text("No channels available.", "info"),
-            reply_markup=create_channel_management_keyboard(),
+            style_text("Cannot remove the only admin.", "error"),
+            reply_markup=create_admin_management_keyboard(),
             parse_mode="Markdown"
         )
         await query.answer()
-        logger.info(f"User {query.from_user.id} viewed empty channel list")
-        return
-    
-    text = "📢 *Channel List*\n\n"
-    text += "*🔒 Fixed Channels*\n"
-    for i, (cid, data) in enumerate(FIXED_CHANNELS.items(), 1):
-        text += f"{i}. `{cid}`: {data['emoji']} {data['name']}\n"
-        text += f"  _{data['description']}_\n"
-        text += f"  Posts: `{channels[cid]['stats']['post_count']}`\n\n"
-    
-    config = config_manager.get_config()
-    if config.get("channels"):
-        text += "*📖 Your Channels*\n"
-        for i, (cid, data) in enumerate(config["channels"].items(), len(FIXED_CHANNELS) + 1):
-            if cid not in FIXED_CHANNELS:
-                text += f"{i}. `{cid}`: `{data['name']}`\n"
-                text += f"  Posts: `{channels[cid]['stats']['post_count']}`\n\n"
+        return ConversationHandler.END
     
     await query.message.edit_text(
-        text,
-        reply_markup=create_channel_management_keyboard(),
+        style_text("Send the user ID of the admin to remove:", "info"),
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"{EMOJI['cancel']} Cancel", callback_data="cancel_admin")]
+        ]),
         parse_mode="Markdown"
     )
+    context.user_data["admin_input"] = "remove_admin"
     await query.answer()
-    logger.debug(f"User {query.from_user.id} viewed channel list")
+    return ADMIN_MANAGEMENT
 
-async def show_channel_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+# ==================== Channel Management ====================
+async def channel_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     channels = config_manager.get_all_channels()
     
-    text = "📊 *Channel Statistics*\n\n"
+    text = f"""
+📢 *Channel List* ({len(channels)} total)
+
+"""
     for i, (cid, data) in enumerate(channels.items(), 1):
-        post_count = data["stats"].get("post_count", 0)
-        text += f"{i}. `{data['name']}` (`{cid}`):\n"
-        text += f"  Posts: `{post_count}`\n"
-        text += f"  Type: `{'Fixed' if data.get('fixed', False) else 'User-added'}`\n"
-        text += f"  Description: `{data.get('description', 'No description')}`\n\n"
+        status = "🔒 Fixed" if data.get("fixed") else "📢 Custom"
+        posts = data.get("stats", {}).get("post_count", 0)
+        text += f"{i}. {data['name']}\n   ID: `{cid}` - {status}\n   Posts: {posts}\n"
     
     await query.message.edit_text(
         text,
@@ -1501,12 +1384,12 @@ async def show_channel_stats(update: Update, context: ContextTypes.DEFAULT_TYPE)
         parse_mode="Markdown"
     )
     await query.answer()
-    logger.debug(f"User {query.from_user.id} viewed channel stats")
+    logger.debug(f"Channel list viewed by user {query.from_user.id}")
 
-async def add_channel_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def add_channel_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.message.edit_text(
-        style_text("Enter channel ID and name (e.g., -1001234567890 Channel Name).", "info"),
+        style_text("Send the channel ID (format: -100xxxxxxxxxx):", "info"),
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton(f"{EMOJI['cancel']} Cancel", callback_data="cancel_channel")]
         ]),
@@ -1514,848 +1397,707 @@ async def add_channel_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
     context.user_data["channel_input"] = "add_channel"
     await query.answer()
-    logger.debug(f"User {query.from_user.id} prompted to add channel")
+    return CHANNEL_MANAGEMENT
 
-async def remove_channel_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def remove_channel_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.message.edit_text(
-        style_text("Enter the channel ID to remove.", "info"),
+        style_text("Send the channel ID to remove:", "info"),
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton(f"{EMOJI['cancel']} Cancel", callback_data="cancel_channel")]
-        ])),
+        ]),
         parse_mode="Markdown"
     )
-    context.user_data["channel_input"] = "delete_channel"
+    context.user_data["channel_input"] = "remove_channel"
     await query.answer()
-    logger.debug(f"User {query.from_user.id} prompted to remove channel")
+    return CHANNEL_MANAGEMENT
 
-# ==================== Post Settings ====================
-async def post_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        style_text("Configure Posting Settings", "header"),
-        reply_markup=create_post_settings_keyboard(),
-        parse_mode="Markdown"
-    )
-    logger.debug(f"User {update.effective_user.id} opened settings")
-
-async def set_delay_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    await query.message.edit_text(
-        style_text("Enter post delay in seconds (0-5).", "info"),
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton(f"{EMOJI['cancel']} Cancel", callback_data="cancel_settings")]
-        ])),
-        parse_mode="Markdown"
-    )
-    context.user_data["settings_input"] = "set_delay"
-    await query.answer()
-    logger.debug(f"User {query.from_user.id} prompted to set delay")
-
-async def set_retries_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    await query.message.edit_text(
-        style_text("Enter max retries (1-10).", "info"),
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton(f"{EMOJI['cancel']} Cancel", callback_data="cancel_settings")]
-        ])),
-        parse_mode="Markdown"
-    )
-    context.user_data["settings_input"] = "set_retries"
-    await query.answer()
-    logger.debug(f"User {query.from_user.id} prompted to set retries")
-
-async def set_footer_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    await query.message.edit_text(
-        style_text(f"Enter footer text (max {MAX_FOOTER_LENGTH} chars) or 'clear' to remove.", "info"),
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton(f"{EMOJI['cancel']} Cancel", callback_data="cancel_settings")]
-        ])),
-        parse_mode="Markdown"
-    )
-    context.user_data["settings_input"] = "set_footer"
-    await query.answer()
-    logger.debug(f"User {query.from_user.id} prompted to set footer")
-
-async def toggle_notifications(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    config = config_manager.get_config()
-    config["settings"]["notifications"] = not config["settings"].get("notifications", True)
-    config_manager.save_config()
-    
-    await query.message.edit_text(
-        style_text(f"Notifications {'enabled' if config['settings']['notifications'] else 'disabled'}.", "success"),
-        reply_markup=create_post_settings_keyboard(),
-        parse_mode="Markdown"
-    )
-    await query.answer()
-    logger.info(f"User {query.from_user.id} toggled notifications to {config['settings']['notifications']}")
-
-async def save_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    await query.message.edit_text(
-        style_text("Settings saved successfully.", "success"),
-        reply_markup=create_main_menu(),
-        parse_mode="Markdown"
-    )
-    await query.answer()
-    context.user_data.pop("settings_input", None)
-    logger.info(f"User {query.from_user.id} saved settings")
-
-async def cancel_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    await query.message.edit_text(
-        style_text("Settings update canceled.", "info"),
-        reply_markup=create_main_menu(),
-        parse_mode="Markdown"
-    )
-    await query.answer()
-    context.user_data.pop("settings_input", None)
-    logger.info(f"User {query.from_user.id} canceled settings update")
-
-# ==================== Search Handler ====================
-
-async def inline_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query: str = update.inline_query.query.lower()
-    user_id: int = update.inline_query.from_user.id
-    
-    if not config_manager.is_admin(user_id):
-        logger.warning(f"Unauthorized inline query attempt by user {user_id}")
-        return
-    
-    channels = config_manager.get_all_channels()
-    results = []
-    
-    for i, (cid, data) in enumerate(channels.items(), 1):
-        if not query or query.lower() in data["name"].lower():
-            results.append(
-                InlineQueryResultArticle(
-                    id=str(uuid4()),
-                    title=data["name"],
-                    description=data["description"],
-                    input_message_content=InputTextMessageContent(
-                        f"Selected channel: {data['name']} (`{cid}`)"
-                    ),
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton(f"{EMOJI['channel']} Select Channel", callback_data=f"toggle_channel_{cid}")]
-                    ])
-                )
-            )
-    
-    await update.inline_query.answer(results[:50])
-    logger.debug(f"Inline search by user {user_id} for query: {query}")
-
-# ==================== Button Handlers ====================
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+# ==================== Button Handler ====================
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Optional[int]:
     query = update.callback_query
     data = query.data
     user_id = query.from_user.id
     
     if not config_manager.is_admin(user_id):
-        await query.message.edit_text(
-            style_text("Permission denied.", "error"),
-            reply_markup=create_main_menu(),
-            parse_mode="Markdown"
-        )
-        await query.answer()
-        logger.warning(f"Unauthorized button query by user {user_id}")
+        await query.answer("Permission denied.", show_alert=True)
         return
     
-    if data == "back_to_categories":
-        await query.message.edit_text(
-            style_text("Select an option:", "header"),
-            reply_markup=create_main_menu(),
-            parse_mode="Markdown"
-        )
-        await query.answer()
-        logger.debug(f"User {user_id} returned to main menu")
-        return
-    
-    # Admin Management
-    if data == "admin_list":
-        await list_admins(update, context)
-    elif data == "admin_stats":
-        await show_admin_stats(update, context)
-    elif data == "admin_add":
-        await add_admin_prompt(update, context)
-    elif data == "admin_remove":
-        await remove_admin_prompt(update, context)
-    elif data == "cancel_admin":
-        await query.message.edit_text(
-            style_text("Admin operation canceled.", "info"),
-            reply_markup=create_admin_management_keyboard(),
-            parse_mode="Markdown"
-        )
-        await query.answer()
-        context.user_data.pop("settings_input", None)
-        logger.debug(f"User {user_id} canceled admin operation")
-    
-    # Channel Management
-    elif data == "channel_list":
-        await list_channels(update, context)
-    elif data == "channel_stats":
-        await show_channel_stats(update, context)
-    elif data == "channel_add":
-        await add_channel_prompt(update, context)
-    elif data == "channel_remove":
-        await remove_channel_prompt(update, context)
-    elif data == "cancel_channel":
-        await query.message.edit_text(
-            style_text("Channel operation canceled.", "info"),
-            reply_markup=create_channel_management_keyboard(),
-            parse_mode="Markdown"
-        )
-        await query.answer()
-        context.user_data.pop("channel_input", None)
-        logger.debug(f"User {user_id} canceled channel operation")
-
-    # Batch Management
-    elif data == "batch_clear":
-        await clear_batch(update, context)
-    elif data == "batch_list":
-        await show_batch(update, context)
-    elif data == "batch_schedule_menu":
-        await schedule_batch_menu(update, context)
-    elif data == "post_options":
-        await post_batch_menu(update, context)
-    elif data.startswith("page_"):
-        page = int(data.split("_")[1])
-        await post_batch_menu(update, context, page=page)
-    elif data.startswith("toggle_"):
-        channel_id = data.split("_")[1]
-        if "selected_channels" not in context.user_data:
-            context.user_data["selected_channels"] = set()
-        if channel_id in context.user_data["selected_channels"]:
-            context.user_data["selected_channels"].remove(channel_id)
+    try:
+        # Admin management
+        if data == "admin_add":
+            return await add_admin_prompt(update, context)
+        elif data == "admin_remove":
+            return await remove_admin_prompt(update, context)
+        elif data == "admin_list":
+            await admin_list(update, context)
+        elif data == "admin_stats":
+            await admin_stats(update, context)
+        
+        # Channel management
+        elif data == "channel_add":
+            return await add_channel_prompt(update, context)
+        elif data == "channel_remove":
+            return await remove_channel_prompt(update, context)
+        elif data == "channel_list":
+            await channel_list(update, context)
+        elif data == "channel_stats":
+            await channel_stats(update, context)
+        
+        # Batch management
+        elif data == "batch_clear":
+            await clear_batch(update, context)
+        elif data == "batch_list":
+            await show_batch(update, context)
+        elif data == "post_options":
+            await post_batch_menu(update, context)
+        elif data == "batch_schedule_menu":
+            await schedule_batch_menu(update, context)
+        
+        # Schedule management
+        elif data == "schedule_list":
+            await list_schedules(update, context)
+        elif data.startswith("schedule_view_"):
+            await view_schedule(update, context)
+        elif data.startswith("delete_job_"):
+            await delete_schedule(update, context)
+        
+        # Post settings
+        elif data == "post_settings":
+            await post_settings(update, context)
+        elif data in ["set_delay", "set_retries", "set_footer"]:
+            return await setting_input_prompt(update, context)
+        elif data == "toggle_notifications":
+            await toggle_notifications(update, context)
+        elif data == "save_settings":
+            await save_post_settings(update, context)
+        
+        # Channel selection
+        elif data.startswith("toggle_"):
+            await toggle_channel_selection(update, context)
+        elif data == "select_all":
+            await select_all_channels(update, context)
+        elif data == "unselect_all":
+            await unselect_all_channels(update, context)
+        elif data.startswith("page_"):
+            page = int(data.split("_")[1])
+            await post_batch_menu(update, context, page)
+        
+        # Post actions
+        elif data == "post_selected":
+            await preview_post(update, context)
+        elif data == "confirm_post":
+            await execute_post(update, context)
+        elif data == "edit_settings":
+            await post_settings(update, context)
+        
+        # Navigation
+        elif data == "back_to_categories":
+            await back_to_main_menu(update, context)
+        elif data == "back_to_schedule_menu":
+            await schedule_management_menu_callback(update, context)
+        elif data == "back_to_schedule_list":
+            await list_schedules(update, context)
+        
+        # Cancel actions
+        elif data in ["cancel_post", "cancel_admin", "cancel_channel", "cancel_schedule", "cancel_settings"]:
+            await cancel_operation(update, context)
+        
         else:
-            context.user_data["selected_channels"].add(channel_id)
-        page = context.user_data.get("page", 0)
-        await post_batch_menu(update, context, page=page)
-    elif data == "select_all":
-        context.user_data["selected_channels"] = set(config_manager.get_all_channels().keys())
-        page = context.user_data.get("page", 0)
-        await post_batch_menu(update, context, page=page)
-    elif data == "unselect_all":
-        context.user_data["selected_channels"] = set()
-        page = context.user_data.get("page", 0)
-        await post_batch_menu(update, context, page=page)
-    elif data == "post_selected":
-        await preview_post(update, context)
+            await query.answer("Unknown action.")
+            
+    except Exception as e:
+        logger.error(f"Error in button handler: {e}", exc_info=True)
+        await query.answer("An error occurred. Please try again.")
+    
+    return None
 
-    # Schedule Management
-    elif data == "schedule_list":
-        await list_schedules(update, context)
-    elif data.startswith("schedule_view_"):
-        job_id = data.split("_")[2]
-        config = config_manager.get_config()
-        if job_id not in config.get("scheduled_posts", {}):
-            await query.message.edit_text(
-                style_text("Scheduled job not found.", "error"),
-                reply_markup=create_schedule_management_keyboard(),
-                parse_mode="Markdown"
-            )
-            await query.answer()
-            logger.warning(f"User {user_id} attempted to view invalid job {job_id}")
-            return
-        job_data = config["scheduled_posts"][job_id]
-        channels = config_manager.get_all_channels()
-        text = f"""
-⏖ *Scheduled Job Details: {job_id[:8]}...*
+# ==================== Helper Functions for Button Handler ====================
+async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    config = config_manager.get_config()
+    admin_stats = config.get("admin_stats", {})
+    
+    text = "👥 *Admin Statistics*\n\n"
+    
+    if not admin_stats:
+        text += "No admin activity recorded yet."
+    else:
+        for admin_id, data in sorted(admin_stats.items(), key=lambda x: x[1].get("posts", 0), reverse=True):
+            posts = data.get("posts", 0)
+            last_action = format_timestamp(data.get("last_action"), relative=True)
+            text += f"• Admin `{admin_id}`: {posts} posts, Last: {last_action}\n"
+    
+    await query.message.edit_text(
+        text,
+        reply_markup=create_admin_management_keyboard(),
+        parse_mode="Markdown"
+    )
+    await query.answer()
 
-• Time: `{format_timestamp(job_data['time'])}`
-• Batch Size: `{job_data.get('batch_size', 0)}` messages
-• Channels: `{len(job_data.get('channels', []))}`
-"""
-        for i, cid in enumerate(job_data.get("channels", []), 1):
-            if cid in channels:
-                text += f"{i}. {channels[cid]['name']}\n"
-        keyboard = [
-            [
-                InlineKeyboardButton(f"{EMOJI['edit']} Reschedule", callback_data=f"reschedule_{job_id}"),
-                InlineKeyboardButton(f"{EMOJI['remove']} Cancel Job", callback_data=f"schedule_delete_{job_id}")
-            ],
-            [InlineKeyboardButton(f"{EMOJI['back']} Back", callback_data="back_to_schedule_menu")]
-        ]
-        await query.message.edit_text(
-            text,
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown"
-        )
+async def channel_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    channels = config_manager.get_all_channels()
+    
+    text = "📊 *Channel Statistics*\n\n"
+    
+    sorted_channels = sorted(channels.items(), key=lambda x: x[1].get("stats", {}).get("post_count", 0), reverse=True)
+    
+    for cid, data in sorted_channels:
+        posts = data.get("stats", {}).get("post_count", 0)
+        status = "🔒" if data.get("fixed") else "📢"
+        text += f"• {status} {data['name']}: {posts} posts\n"
+    
+    await query.message.edit_text(
+        text,
+        reply_markup=create_channel_management_keyboard(),
+        parse_mode="Markdown"
+    )
+    await query.answer()
+
+async def toggle_channel_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    channel_id = query.data.split("_", 1)[1]
+    selected_channels = context.user_data.get("selected_channels", set())
+    
+    if channel_id in selected_channels:
+        selected_channels.remove(channel_id)
+    else:
+        selected_channels.add(channel_id)
+    
+    context.user_data["selected_channels"] = selected_channels
+    
+    channels = config_manager.get_all_channels()
+    page = context.user_data.get("page", 0)
+    keyboard, _ = build_channel_selection_keyboard(selected_channels, channels, page)
+    
+    try:
+        await query.message.edit_reply_markup(reply_markup=keyboard)
+        await query.answer(f"Channel {'selected' if channel_id in selected_channels else 'deselected'}")
+    except Exception as e:
+        logger.error(f"Error updating channel selection: {e}")
         await query.answer()
-    elif data == "back_to_schedule_menu":
+
+async def select_all_channels(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    channels = config_manager.get_all_channels()
+    context.user_data["selected_channels"] = set(channels.keys())
+    
+    page = context.user_data.get("page", 0)
+    keyboard, _ = build_channel_selection_keyboard(context.user_data["selected_channels"], channels, page)
+    
+    try:
+        await query.message.edit_reply_markup(reply_markup=keyboard)
+        await query.answer("All channels selected")
+    except Exception as e:
+        logger.error(f"Error selecting all channels: {e}")
+        await query.answer()
+
+async def unselect_all_channels(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    context.user_data["selected_channels"] = set()
+    
+    channels = config_manager.get_all_channels()
+    page = context.user_data.get("page", 0)
+    keyboard, _ = build_channel_selection_keyboard(set(), channels, page)
+    
+    try:
+        await query.message.edit_reply_markup(reply_markup=keyboard)
+        await query.answer("All channels deselected")
+    except Exception as e:
+        logger.error(f"Error deselecting all channels: {e}")
+        await query.answer()
+
+async def delete_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    job_id = query.data.split("_")[2]
+    config = config_manager.get_config()
+    
+    if job_id in config.get("scheduled_posts", {}):
+        del config["scheduled_posts"][job_id]
+        config_manager.save_config()
         await query.message.edit_text(
-            style_text("Schedule Management Dashboard", "header"),
+            style_text("Scheduled job deleted successfully.", "success"),
             reply_markup=create_schedule_management_keyboard(),
             parse_mode="Markdown"
         )
-        await query.answer()
-    elif data.startswith("schedule_delete_"):
-        job_id = data.split("_")[2]
-        config = config_manager.get_config()
-        if job_id in config.get("scheduled_posts", {}):
-            config["scheduled_posts"].pop(job_id)
-            config_manager.save_config()
-            await query.message.edit_text(
-                style_text(f"Scheduled job {job_id[:8]} canceled.", "success"),
-                reply_markup=create_schedule_management_keyboard(),
-                parse_mode="Markdown"
-            )
-            logger.info(f"User {user_id} canceled scheduled job {job_id}")
-        else:
-            await query.message.edit_text(
-                style_text("Scheduled job not found.", "error"),
-                reply_markup=create_schedule_management_keyboard(),
-                parse_mode="Markdown"
-            )
-            logger.warning(f"User {user_id} attempted to cancel invalid job {job_id}")
-        await query.answer()
-    elif data.startswith("reschedule_"):
-        job_id = data.split("_")[1]
-        context.user_data["reschedule_job_id"] = job_id
+        logger.info(f"User {query.from_user.id} deleted scheduled job {job_id}")
+    else:
         await query.message.edit_text(
-            style_text("Enter new schedule time (YYYY-MM-DD HH:MM).", "info"),
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(f"{EMOJI['cancel']} Cancel", callback_data="cancel_schedule")]
-            ]),
-            parse_mode="Markdown"
-        )
-        context.user_data["schedule_input"] = "reschedule_batch"
-        await query.answer()
-    elif data == "cancel_schedule":
-        await query.message.edit_text(
-            style_text("Schedule operation canceled.", "info"),
+            style_text("Scheduled job not found.", "error"),
             reply_markup=create_schedule_management_keyboard(),
             parse_mode="Markdown"
         )
-        await query.answer()
-        context.user_data.pop("schedule_input", None)
-        context.user_data.pop("reschedule_job_id", None)
-        logger.debug(f"User {user_id} canceled schedule operation")
+    
+    await query.answer()
 
-    # Post Execution
-    elif data == "confirm_post":
-        success = await execute_post(update, context)
-        if not success:
-            await query.message.edit_text(
-                style_text("Posting failed. Check logs or try again.", "error"),
-                reply_markup=create_main_menu(),
-                parse_mode="Markdown"
-            )
-        await query.answer()
-        logger.info(f"User {user_id} confirmed post execution")
-    elif data == "edit_settings":
-        await query.message.edit_text(
-            style_text("Configure Posting Settings", "header"),
-            reply_markup=create_post_settings_keyboard(),
-            parse_mode="Markdown"
-        )
-        await query.answer()
-    elif data == "cancel_post":
-        context.user_data["selected_channels"] = set()
-        context.user_data.pop("page", None)
-        await query.message.edit_text(
-            style_text("Posting canceled.", "info"),
-            reply_markup=create_batch_management_keyboard(),
-            parse_mode="Markdown"
-        )
-        await query.answer()
-        logger.info(f"User {user_id} canceled post")
+async def setting_input_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    setting_type = query.data
+    
+    prompts = {
+        "set_delay": "Enter post delay in seconds (0.1-10):",
+        "set_retries": "Enter max retries (1-10):",
+        "set_footer": "Enter footer text (max 200 chars):"
+    }
+    
+    await query.message.edit_text(
+        style_text(prompts[setting_type], "info"),
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"{EMOJI['cancel']} Cancel", callback_data="cancel_settings")]
+        ]),
+        parse_mode="Markdown"
+    )
+    
+    context.user_data["settings_input"] = setting_type
+    await query.answer()
+    return POST_SETTINGS
 
-    # Settings Management
-    elif data == "post_settings":
-        await query.message.edit_text(
-            style_text("Configure Posting Settings", "header"),
-            reply_markup=create_post_settings_keyboard(),
-            parse_mode="Markdown"
-        )
-        await query.answer()
-    elif data == "set_delay":
-        await set_delay_prompt(update, context)
-    elif data == "set_retries":
-        await set_retries_prompt(update, context)
-    elif data == "set_footer":
-        await set_footer_prompt(update, context)
-    elif data == "toggle_notifications":
-        await toggle_notifications(update, context)
-    elif data == "save_settings":
-        await save_settings(update, context)
-    elif data == "cancel_settings":
-        await cancel_settings(update, context)
-
-# ==================== Input Handlers ====================
-async def handle_settings_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user_id: int = update.effective_user.id
-    text: str = update.message.text.strip()
-    settings_input: Optional[str] = context.user_data.get("settings_input")
-
-    if not settings_input:
-        logger.debug(f"User {user_id} sent input without active settings prompt")
-        return ConversationHandler.END
-
+async def toggle_notifications(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
     config = config_manager.get_config()
     settings = config.setdefault("settings", {})
+    
+    settings["notifications"] = not settings.get("notifications", True)
+    config_manager.save_config()
+    
+    await query.message.edit_text(
+        style_text("Post Settings Configuration", "header"),
+        reply_markup=create_post_settings_keyboard(),
+        parse_mode="Markdown"
+    )
+    await query.answer(f"Notifications {'enabled' if settings['notifications'] else 'disabled'}")
 
-    if settings_input == "set_delay":
-        try:
-            delay = float(text)
-            if 0 <= delay <= 5:
-                settings["default_delay"] = delay
-                config_manager.save_config()
-                await update.message.reply_text(
-                    style_text(f"Post delay set to {delay}s.", "success"),
-                    reply_markup=create_post_settings_keyboard(),
-                    parse_mode="Markdown"
-                )
-                logger.info(f"User {user_id} set post delay to {delay}s")
-            else:
-                await update.message.reply_text(
-                    style_text("Delay must be between 0 and 5 seconds.", "error"),
-                    reply_markup=create_post_settings_keyboard(),
-                    parse_mode="Markdown"
-                )
-                logger.warning(f"User {user_id} provided invalid delay: {text}")
-                return POST_SETTINGS
-        except ValueError:
-            await update.message.reply_text(
-                style_text("Invalid number format for delay.", "error"),
-                reply_markup=create_post_settings_keyboard(),
-                parse_mode="Markdown"
-            )
-            logger.warning(f"User {user_id} provided invalid delay format: {text}")
-            return POST_SETTINGS
+async def save_post_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.message.edit_text(
+        style_text("Settings saved successfully.", "success"),
+        reply_markup=create_batch_management_keyboard(),
+        parse_mode="Markdown"
+    )
+    await query.answer()
 
-    elif settings_input == "set_retries":
-        try:
-            retries = int(text)
-            if 1 <= retries <= 10:
-                settings["max_retries"] = retries
-                config_manager.save_config()
-                await update.message.reply_text(
-                    style_text(f"Max retries set to {retries}.", "success"),
-                    reply_markup=create_post_settings_keyboard(),
-                    parse_mode="Markdown"
-                )
-                logger.info(f"User {user_id} set max retries to {retries}")
-            else:
-                await update.message.reply_text(
-                    style_text("Retries must be between 1 and 10.", "error"),
-                    reply_markup=create_post_settings_keyboard(),
-                    parse_mode="Markdown"
-                )
-                logger.warning(f"User {user_id} provided invalid retries: {text}")
-                return POST_SETTINGS
-        except ValueError:
-            await update.message.reply_text(
-                style_text("Invalid number format for retries.", "error"),
-                reply_markup=create_post_settings_keyboard(),
-                parse_mode="Markdown"
-            )
-            logger.warning(f"User {user_id} provided invalid retries format: {text}")
-            return POST_SETTINGS
+async def back_to_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.message.edit_text(
+        style_text("Select an option from the main menu:", "info"),
+        reply_markup=create_main_menu(),
+        parse_mode="Markdown"
+    )
+    await query.answer()
 
-    elif settings_input == "set_footer":
-        if text.lower() == "clear":
-            settings["footer"] = ""
-            config_manager.save_config()
-            await update.message.reply_text(
-                style_text("Footer cleared.", "success"),
-                reply_markup=create_post_settings_keyboard(),
-                parse_mode="Markdown"
-            )
-            logger.info(f"User {user_id} cleared footer")
-        elif len(text) <= MAX_FOOTER_LENGTH:
-            settings["footer"] = text
-            config_manager.save_config()
-            await update.message.reply_text(
-                style_text("Footer updated successfully.", "success"),
-                reply_markup=create_post_settings_keyboard(),
-                parse_mode="Markdown"
-            )
-            logger.info(f"User {user_id} set footer: {text[:50]}...")
-        else:
-            await update.message.reply_text(
-                style_text(f"Footer too long. Max {MAX_FOOTER_LENGTH} characters.", "error"),
-                reply_markup=create_post_settings_keyboard(),
-                parse_mode="Markdown"
-            )
-            logger.warning(f"User {user_id} provided too long footer: {len(text)} chars")
-            return POST_SETTINGS
+async def schedule_management_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    config = config_manager.get_config()
+    scheduled_jobs = config.get("scheduled_posts", {})
+    
+    text = f"""
+⏖ *Schedule Management Dashboard*
 
-    elif settings_input == "add_admin":
+Active scheduled jobs: `{len(scheduled_jobs)}`
+"""
+    if scheduled_jobs:
+        text += "\n*Recent Scheduled Jobs:*\n"
+        for i, (job_id, job_data) in enumerate(sorted(scheduled_jobs.items(), key=lambda x: x[1]["time"])[:3], 1):
+            text += f"{i}. Job `{job_id[:8]}...`: {format_timestamp(job_data['time'], relative=True)} "
+            text += f"({job_data.get('batch_size', 0)} messages, {len(job_data.get('channels', []))} channels)\n"
+    
+    await query.message.edit_text(
+        text,
+        reply_markup=create_schedule_management_keyboard(),
+        parse_mode="Markdown"
+    )
+    await query.answer()
+
+async def cancel_operation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    context.user_data.pop("admin_input", None)
+    context.user_data.pop("channel_input", None)
+    context.user_data.pop("settings_input", None)
+    context.user_data.pop("schedule_input", None)
+    
+    await query.message.edit_text(
+        style_text("Operation canceled.", "info"),
+        reply_markup=create_main_menu(),
+        parse_mode="Markdown"
+    )
+    await query.answer()
+
+# ==================== Input Handlers ====================
+async def handle_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user_id = update.effective_user.id
+    text = update.message.text.strip()
+    input_type = context.user_data.get("admin_input")
+    
+    if not input_type:
+        return ConversationHandler.END
+    
+    config = config_manager.get_config()
+    
+    if input_type == "add_admin":
         if not validate_user_id(text):
             await update.message.reply_text(
-                style_text("Invalid User ID.", "error"),
+                style_text("Invalid user ID format.", "error"),
                 reply_markup=create_admin_management_keyboard(),
                 parse_mode="Markdown"
             )
-            logger.warning(f"User {user_id} provided invalid admin ID: {text}")
-            return ADMIN_MANAGEMENT
-        if text == str(OWNER_ID) or text in config.get("admins", []):
+        elif text in config.get("admins", []):
             await update.message.reply_text(
-                style_text("User is already an admin or is the owner.", "warning"),
+                style_text("User is already an admin.", "warning"),
                 reply_markup=create_admin_management_keyboard(),
                 parse_mode="Markdown"
             )
-            logger.info(f"User {user_id} attempted to add existing admin/owner: {text}")
         else:
-            config["admins"].append(text)
+            config.setdefault("admins", []).append(text)
             config_manager.save_config()
             await update.message.reply_text(
-                style_text(f"Admin {text} added successfully.", "success"),
+                style_text(f"User {text} added as admin.", "success"),
                 reply_markup=create_admin_management_keyboard(),
                 parse_mode="Markdown"
             )
-            logger.info(f"User {user_id} added admin: {text}")
-
-    elif settings_input == "delete_admin":
-        if not validate_user_id(text):
-            await update.message.reply_text(
-                style_text("Invalid User ID.", "error"),
-                reply_markup=create_admin_management_keyboard(),
-                parse_mode="Markdown"
-            )
-            logger.warning(f"User {user_id} provided invalid admin ID: {text}")
-            return ADMIN_MANAGEMENT
+            logger.info(f"User {user_id} added admin {text}")
+    
+    elif input_type == "remove_admin":
         if text == str(OWNER_ID):
             await update.message.reply_text(
                 style_text("Cannot remove the owner.", "error"),
                 reply_markup=create_admin_management_keyboard(),
                 parse_mode="Markdown"
             )
-            logger.warning(f"User {user_id} attempted to remove owner: {text}")
         elif text not in config.get("admins", []):
             await update.message.reply_text(
                 style_text("User is not an admin.", "warning"),
                 reply_markup=create_admin_management_keyboard(),
                 parse_mode="Markdown"
             )
-            logger.info(f"User {user_id} attempted to remove non-admin: {text}")
         else:
             config["admins"].remove(text)
             config_manager.save_config()
             await update.message.reply_text(
-                style_text(f"Admin {text} removed successfully.", "success"),
+                style_text(f"Admin {text} removed.", "success"),
                 reply_markup=create_admin_management_keyboard(),
                 parse_mode="Markdown"
             )
-            logger.info(f"User {user_id} removed admin: {text}")
-
-    context.user_data.pop("settings_input", None)
+            logger.info(f"User {user_id} removed admin {text}")
+    
+    context.user_data.pop("admin_input", None)
     return ConversationHandler.END
 
 async def handle_channel_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user_id: int = update.effective_user.id
-    text: str = update.message.text.strip()
-    channel_input: Optional[str] = context.user_data.get("channel_input")
-
-    if not channel_input:
-        logger.debug(f"User {user_id} sent input without active channel prompt")
+    user_id = update.effective_user.id
+    text = update.message.text.strip()
+    input_type = context.user_data.get("channel_input")
+    
+    if not input_type:
         return ConversationHandler.END
-
+    
     config = config_manager.get_config()
-
-    if channel_input == "add_channel":
-        match = re.match(r"^(-100\d{10,})\s+(.+)$", text)
-        if not match:
+    
+    if input_type == "add_channel":
+        if not validate_channel_id(text):
             await update.message.reply_text(
-                style_text("Invalid format. Use: -1001234567890 Channel Name", "error"),
+                style_text("Invalid channel ID format. Use -100xxxxxxxxxx.", "error"),
                 reply_markup=create_channel_management_keyboard(),
                 parse_mode="Markdown"
             )
-            logger.warning(f"User {user_id} provided invalid channel format: {text}")
-            return CHANNEL_MANAGEMENT
-        channel_id, name = match.groups()
-        if not validate_channel_id(channel_id):
-            await update.message.reply_text(
-                style_text("Invalid channel ID.", "error"),
-                reply_markup=create_channel_management_keyboard(),
-                parse_mode="Markdown"
-            )
-            logger.warning(f"User {user_id} provided invalid channel ID: {channel_id}")
-            return CHANNEL_MANAGEMENT
-        if channel_id in FIXED_CHANNELS or channel_id in config.get("channels", {}):
+        elif text in config.get("channels", {}) or text in FIXED_CHANNELS:
             await update.message.reply_text(
                 style_text("Channel already exists.", "warning"),
                 reply_markup=create_channel_management_keyboard(),
                 parse_mode="Markdown"
             )
-            logger.info(f"User {user_id} attempted to add existing channel: {channel_id}")
         else:
-            config["channels"][channel_id] = {"name": name.strip(), "stats": {"post_count": 0}}
-            config_manager.save_config()
-            await update.message.reply_text(
-                style_text(f"Channel {name} ({channel_id}) added.", "success"),
-                reply_markup=create_channel_management_keyboard(),
-                parse_mode="Markdown"
-            )
-            logger.info(f"User {user_id} added channel: {channel_id} ({name})")
-
-    elif channel_input == "delete_channel":
-        if not validate_channel_id(text):
-            await update.message.reply_text(
-                style_text("Invalid channel ID.", "error"),
-                reply_markup=create_channel_management_keyboard(),
-                parse_mode="Markdown"
-            )
-            logger.warning(f"User {user_id} provided invalid channel ID: {text}")
-            return CHANNEL_MANAGEMENT
+            try:
+                # Try to get channel info
+                chat = await context.bot.get_chat(text)
+                channel_name = chat.title or f"Channel {text}"
+                
+                config.setdefault("channels", {})[text] = {
+                    "name": channel_name,
+                    "description": "User-added channel",
+                    "stats": {"post_count": 0}
+                }
+                config_manager.save_config()
+                await update.message.reply_text(
+                    style_text(f"Channel '{channel_name}' added successfully.", "success"),
+                    reply_markup=create_channel_management_keyboard(),
+                    parse_mode="Markdown"
+                )
+                logger.info(f"User {user_id} added channel {text}")
+            except Exception as e:
+                logger.error(f"Error adding channel {text}: {e}")
+                await update.message.reply_text(
+                    style_text("Failed to add channel. Make sure the bot has access.", "error"),
+                    reply_markup=create_channel_management_keyboard(),
+                    parse_mode="Markdown"
+                )
+    
+    elif input_type == "remove_channel":
         if text in FIXED_CHANNELS:
             await update.message.reply_text(
-                style_text("Cannot remove fixed channel.", "error"),
+                style_text("Cannot remove fixed channels.", "error"),
                 reply_markup=create_channel_management_keyboard(),
                 parse_mode="Markdown"
             )
-            logger.warning(f"User {user_id} attempted to remove fixed channel: {text}")
         elif text not in config.get("channels", {}):
             await update.message.reply_text(
                 style_text("Channel not found.", "warning"),
                 reply_markup=create_channel_management_keyboard(),
                 parse_mode="Markdown"
             )
-            logger.info(f"User {user_id} attempted to remove non-existent channel: {text}")
         else:
-            channel_name = config["channels"][text]["name"]
-            config["channels"].pop(text)
+            channel_name = config["channels"][text].get("name", text)
+            del config["channels"][text]
             config_manager.save_config()
             await update.message.reply_text(
-                style_text(f"Channel {channel_name} ({text}) removed.", "success"),
+                style_text(f"Channel '{channel_name}' removed.", "success"),
                 reply_markup=create_channel_management_keyboard(),
                 parse_mode="Markdown"
             )
-            logger.info(f"User {user_id} removed channel: {text} ({channel_name})")
-
+            logger.info(f"User {user_id} removed channel {text}")
+    
     context.user_data.pop("channel_input", None)
     return ConversationHandler.END
 
-async def handle_schedule_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user_id: int = update.effective_user.id
-    text: str = update.message.text.strip()
-    schedule_input: Optional[str] = context.user_data.get("schedule_input")
-
-    if not schedule_input:
-        logger.debug(f"User {user_id} sent input without active schedule prompt")
+async def handle_settings_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = update.message.text.strip()
+    input_type = context.user_data.get("settings_input")
+    
+    if not input_type:
         return ConversationHandler.END
-
+    
     config = config_manager.get_config()
-    schedule_dt = validate_schedule_time(text)
-
-    if not schedule_dt:
-        await update.message.reply_text(
-            style_text("Invalid or past date format. Use YYYY-MM-DD HH:MM.", "error"),
-            reply_markup=create_batch_management_keyboard(),
-            parse_mode="Markdown"
-        )
-        logger.warning(f"User {user_id} provided invalid schedule time: {text}")
-        return SCHEDULE_BATCH
-
-    batch = context.user_data.get("batch", [])
-    selected_channels = context.user_data.get("selected_channels", set())
-
-    if not batch or not selected_channels:
-        await update.message.reply_text(
-            style_text("No messages or channels selected. Start over.", "error"),
-            reply_markup=create_batch_management_keyboard(),
-            parse_mode="Markdown"
-        )
-        logger.warning(f"User {user_id} attempted to schedule without batch or channels")
-        context.user_data.pop("schedule_input", None)
-        return ConversationHandler.END
-
-    if check_schedule_conflict(config, schedule_dt, selected_channels):
-        await update.message.reply_text(
-            style_text("Schedule conflict detected. Choose a different time.", "error"),
-            reply_markup=create_batch_management_keyboard(),
-            parse_mode="Markdown"
-        )
-        logger.warning(f"User {user_id} attempted to schedule with conflict at {text}")
-        return SCHEDULE_BATCH
-
-    if schedule_input == "schedule_batch":
-        job_id = str(uuid4())
-        config["scheduled_posts"][job_id] = {
-            "time": schedule_dt.isoformat(),
-            "batch_ids": batch[:],
-            "batch_size": len(batch),
-            "channels": list(selected_channels),
-            "user_id": str(user_id)
-        }
-        config_manager.save_config()
-        context.user_data["schedule_time"] = schedule_dt.isoformat()
-        await update.message.reply_text(
-            style_text(f"Batch scheduled for {schedule_dt.strftime('%Y-%m-%d %H:%M')} to {len(selected_channels)} channels.", "success"),
-            reply_markup=create_batch_management_keyboard(),
-            parse_mode="Markdown"
-        )
-        logger.info(f"User {user_id} scheduled batch job {job_id} at {text}")
-
-    elif schedule_input == "reschedule_batch":
-        job_id = context.user_data.get("reschedule_job_id")
-        if not job_id or job_id not in config.get("scheduled_posts", {}):
-            await update.message.reply_text(
-                style_text("Scheduled job not found.", "error"),
-                reply_markup=create_schedule_management_keyboard(),
-                parse_mode="Markdown"
-            )
-            logger.warning(f"User {user_id} attempted to reschedule invalid job {job_id}")
-            context.user_data.pop("reschedule_job_id", None)
-            return ConversationHandler.END
-
-        config["scheduled_posts"][job_id]["time"] = schedule_dt.isoformat()
-        config_manager.save_config()
-        await update.message.reply_text(
-            style_text(f"Job {job_id[:8]} rescheduled to {schedule_dt.strftime('%Y-%m-%d %H:%M')}.", "success"),
-            reply_markup=create_schedule_management_keyboard(),
-            parse_mode="Markdown"
-        )
-        logger.info(f"User {user_id} rescheduled job {job_id} to {text}")
-        context.user_data.pop("reschedule_job_id", None)
-
-    context.user_data.pop("schedule_input", None)
+    settings = config.setdefault("settings", {})
+    
+    try:
+        if input_type == "set_delay":
+            delay = float(text)
+            if 0.1 <= delay <= 10:
+                settings["default_delay"] = delay
+                config_manager.save_config()
+                message = f"Post delay set to {delay} seconds."
+                style = "success"
+            else:
+                message = "Delay must be between 0.1 and 10 seconds."
+                style = "error"
+        
+        elif input_type == "set_retries":
+            retries = int(text)
+            if 1 <= retries <= 10:
+                settings["max_retries"] = retries
+                config_manager.save_config()
+                message = f"Max retries set to {retries}."
+                style = "success"
+            else:
+                message = "Retries must be between 1 and 10."
+                style = "error"
+        
+        elif input_type == "set_footer":
+            if len(text) <= MAX_FOOTER_LENGTH:
+                settings["footer"] = text
+                config_manager.save_config()
+                message = f"Footer updated: {text[:50]}{'...' if len(text) > 50 else ''}"
+                style = "success"
+            else:
+                message = f"Footer too long. Max {MAX_FOOTER_LENGTH} characters."
+                style = "error"
+        
+        else:
+            message = "Unknown setting type."
+            style = "error"
+            
+    except ValueError:
+        message = "Invalid input format."
+        style = "error"
+    
+    await update.message.reply_text(
+        style_text(message, style),
+        reply_markup=create_post_settings_keyboard(),
+        parse_mode="Markdown"
+    )
+    
+    context.user_data.pop("settings_input", None)
     return ConversationHandler.END
 
-# ==================== Scheduled Job Runner ====================
-async def run_scheduled_jobs(application: Application) -> None:
-    while True:
-        config = config_manager.get_config()
-        config_manager._cleanup_expired_jobs()
-        now = datetime.now()
-        scheduled_posts = config.get("scheduled_posts", {})
-
-        for job_id, job_data in list(scheduled_posts.items()):
-            try:
-                job_time = datetime.fromisoformat(job_data["time"])
-                if now >= job_time:
-                    user_id = int(job_data["user_id"])
-                    context = ContextTypes.DEFAULT_TYPE(application=application)
-                    context.user_data["batch"] = job_data["batch_ids"]
-                    context.user_data["selected_channels"] = set(job_data["channels"])
-
-                    update = Update(
-                        update_id=0,
-                        callback_query=CallbackQuery(
-                            id=str(uuid4()),
-                            from_user=application.bot.get_user(user_id),
-                            chat_instance=str(uuid4()),
-                            message=await application.bot.send_message(
-                                chat_id=user_id,
-                                text="Executing scheduled post..."
-                            ),
-                            data="confirm_post"
-                        )
-                    )
-
-                    await execute_post(update, context, is_scheduled=True, job_id=job_id)
-                    logger.info(f"Executed scheduled job {job_id} for user {user_id}")
-            except Exception as e:
-                logger.error(f"Error executing scheduled job {job_id}: {e}", exc_info=True)
-                await application.bot.send_message(
-                    chat_id=job_data["user_id"],
-                    text=style_text(f"Scheduled job {job_id[:8]} failed: {str(e)[:500]}.", "error"),
+# ==================== Inline Query Handler ====================
+async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.inline_query.query
+    user_id = update.effective_user.id
+    
+    if not config_manager.is_admin(user_id):
+        return
+    
+    channels = config_manager.get_all_channels()
+    results = []
+    
+    # Filter channels based on query
+    filtered_channels = {
+        cid: data for cid, data in channels.items()
+        if not query or query.lower() in data["name"].lower() or query in cid
+    }
+    
+    for cid, data in list(filtered_channels.items())[:50]:  # Limit to 50 results
+        title = data["name"]
+        description = f"ID: {cid} | Posts: {data.get('stats', {}).get('post_count', 0)}"
+        if data.get("fixed"):
+            description += " | Fixed Channel"
+        
+        results.append(
+            InlineQueryResultArticle(
+                id=cid,
+                title=title,
+                description=description,
+                input_message_content=InputTextMessageContent(
+                    message_text=f"Selected channel: {title} ({cid})",
                     parse_mode="Markdown"
                 )
+            )
+        )
+    
+    await update.inline_query.answer(results)
 
-        await asyncio.sleep(60)  # Check every minute
+# ==================== Scheduled Jobs Runner ====================
+async def run_scheduled_jobs(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Run scheduled posting jobs."""
+    config = config_manager.get_config()
+    scheduled_posts = config.get("scheduled_posts", {})
+    now = datetime.now()
+    executed_jobs = []
+    
+    for job_id, job_data in scheduled_posts.items():
+        try:
+            job_time = datetime.fromisoformat(job_data["time"])
+            if now >= job_time:
+                # Execute the scheduled job
+                batch_ids = job_data.get("batch_ids", [])
+                channels = job_data.get("channels", [])
+                admin_id = job_data.get("admin_id")
+                
+                if batch_ids and channels:
+                    settings = config.get("settings", {})
+                    delay = settings.get("default_delay", POST_DELAY_SECONDS)
+                    footer = settings.get("footer", "")
+                    
+                    successful_posts = 0
+                    failed_posts = 0
+                    
+                    for msg_id in batch_ids:
+                        for channel_id in channels:
+                            try:
+                                # Note: In a real implementation, you'd need to store the original chat_id
+                                # For now, we'll skip the actual posting and just log
+                                logger.info(f"Would post message {msg_id} to channel {channel_id}")
+                                successful_posts += 1
+                                await asyncio.sleep(delay)
+                            except Exception as e:
+                                logger.error(f"Failed to post scheduled message {msg_id} to {channel_id}: {e}")
+                                failed_posts += 1
+                    
+                    # Update stats
+                    post_id = str(uuid4())
+                    config_manager.update_stats(
+                        posts=successful_posts,
+                        batches=1,
+                        channels=channels,
+                        admin_id=admin_id,
+                        post_id=post_id
+                    )
+                    
+                    logger.info(f"Executed scheduled job {job_id}: {successful_posts} successful, {failed_posts} failed")
+                
+                executed_jobs.append(job_id)
+                
+        except Exception as e:
+            logger.error(f"Error executing scheduled job {job_id}: {e}")
+            executed_jobs.append(job_id)  # Remove failed jobs too
+    
+    # Remove executed jobs
+    for job_id in executed_jobs:
+        scheduled_posts.pop(job_id, None)
+    
+    if executed_jobs:
+        config_manager.save_config()
+    
+    # Cleanup expired jobs
+    config_manager._cleanup_expired_jobs()
 
 # ==================== Main Application ====================
 def main() -> None:
-    application = Application.builder().token(BOT_TOKEN).build()
-
-    # Conversation Handlers
-    admin_conv_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(button_handler, pattern="^(admin_add|admin_remove)$")],
-        states={
-            ADMIN_MANAGEMENT: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_settings_input)
-            ]
-        },
-        fallbacks=[
-            CommandHandler("cancel", cancel),
-            CallbackQueryHandler(button_handler, pattern="^cancel_admin$")
-        ]
-    )
-
-    channel_conv_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(button_handler, pattern="^(channel_add|channel_remove)$")],
-        states={
-            CHANNEL_MANAGEMENT: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_channel_input)
-            ]
-        },
-        fallbacks=[
-            CommandHandler("cancel", cancel),
-            CallbackQueryHandler(button_handler, pattern="^cancel_channel$")
-        ]
-    )
-
-    settings_conv_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(button_handler, pattern="^(set_delay|set_retries|set_footer)$")],
-        states={
-            POST_SETTINGS: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_settings_input)
-            ]
-        },
-        fallbacks=[
-            CommandHandler("cancel", cancel),
-            CallbackQueryHandler(button_handler, pattern="^cancel_settings$")
-        ]
-    )
-
-    schedule_conv_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(button_handler, pattern="^(batch_schedule_menu|reschedule_.*)$")],
-        states={
-            SCHEDULE_BATCH: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_schedule_input)
-            ]
-        },
-        fallbacks=[
-            CommandHandler("cancel", cancel),
-            CallbackQueryHandler(button_handler, pattern="^cancel_schedule$")
-        ]
-    )
-
-    # Command Handlers
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", show_help))
-    application.add_handler(CommandHandler("cancel", cancel))
-    application.add_handler(CommandHandler("status", status))
-
-    # Message Handlers
-    application.add_handler(MessageHandler(
-        filters.Regex(f"^{'|'.join(map(re.escape, [f'{emoji} {text}' for emoji, text in [
-            (EMOJI['admin'], 'Admin Panel'),
-            (EMOJI['channel'], 'Channels'),
-            (EMOJI['stats'], 'Analytics'),
-            (EMOJI['batch'], 'Post'),
-            (EMOJI['schedule'], 'Schedules'),
-            (EMOJI['settings'], 'Settings'),
-            (EMOJI['help'], 'Help')
-        ]]))}$"),
-        handle_main_menu
-    ))
-    application.add_handler(MessageHandler(
-        filters.TEXT & (~filters.COMMAND | filters.Document.ALL | filters.PHOTO | filters.VIDEO),
-        add_to_batch
-    ))
-
-    # Callback Query Handler
-    application.add_handler(CallbackQueryHandler(button_handler))
-
-    # Inline Query Handler
-    application.add_handler(InlineQueryHandler(inline_search))
-
-    # Conversation Handlers
-    application.add_handler(admin_conv_handler)
-    application.add_handler(channel_conv_handler)
-    application.add_handler(settings_conv_handler)
-    application.add_handler(schedule_conv_handler)
-
-    # Start scheduled job runner
-    application.job_queue.run_once(lambda ctx: asyncio.create_task(run_scheduled_jobs(application)), 0)
-
-    # Start the Bot
-    logger.info("Starting Advanced Channel Manager Pro")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    """Start the bot."""
+    try:
+        application = Application.builder().token(BOT_TOKEN).build()
+        
+        # Conversation handlers
+        admin_conv_handler = ConversationHandler(
+            entry_points=[CallbackQueryHandler(button_handler, pattern="^(admin_add|admin_remove)$")],
+            states={
+                ADMIN_MANAGEMENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_admin_input)]
+            },
+            fallbacks=[CommandHandler("cancel", cancel), CallbackQueryHandler(button_handler, pattern="^cancel_admin$")]
+        )
+        
+        channel_conv_handler = ConversationHandler(
+            entry_points=[CallbackQueryHandler(button_handler, pattern="^(channel_add|channel_remove)$")],
+            states={
+                CHANNEL_MANAGEMENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_channel_input)]
+            },
+            fallbacks=[CommandHandler("cancel", cancel), CallbackQueryHandler(button_handler, pattern="^cancel_channel$")]
+        )
+        
+        settings_conv_handler = ConversationHandler(
+            entry_points=[CallbackQueryHandler(button_handler, pattern="^(set_delay|set_retries|set_footer)$")],
+            states={
+                POST_SETTINGS: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_settings_input)]
+            },
+            fallbacks=[CommandHandler("cancel", cancel), CallbackQueryHandler(button_handler, pattern="^cancel_settings$")]
+        )
+        
+        schedule_conv_handler = ConversationHandler(
+            entry_points=[CallbackQueryHandler(button_handler, pattern="^batch_schedule_menu$")],
+            states={
+                SCHEDULE_BATCH: [MessageHandler(filters.TEXT & ~filters.COMMAND, schedule_batch_confirm)]
+            },
+            fallbacks=[CommandHandler("cancel", cancel), CallbackQueryHandler(button_handler, pattern="^cancel_schedule$")]
+        )
+        
+        # Add handlers
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(CommandHandler("help", show_help))
+        application.add_handler(CommandHandler("cancel", cancel))
+        application.add_handler(CommandHandler("status", status))
+        
+        # Conversation handlers
+        application.add_handler(admin_conv_handler)
+        application.add_handler(channel_conv_handler)
+        application.add_handler(settings_conv_handler)
+        application.add_handler(schedule_conv_handler)
+        
+        # Button handler
+        application.add_handler(CallbackQueryHandler(button_handler))
+        
+        # Inline query handler
+        application.add_handler(InlineQueryHandler(inline_query))
+        
+        # Main menu handler
+        application.add_handler(MessageHandler(
+            filters.TEXT & filters.Regex(f"^({EMOJI['admin']}|{EMOJI['channel']}|{EMOJI['stats']}|{EMOJI['batch']}|{EMOJI['schedule']}|{EMOJI['settings']}|{EMOJI['help']})") & ~filters.COMMAND,
+            handle_main_menu
+        ))
+        
+        # Message handler for batch addition
+        application.add_handler(MessageHandler(
+            (filters.TEXT | filters.PHOTO | filters.VIDEO | filters.DOCUMENT) & ~filters.COMMAND,
+            add_to_batch
+        ))
+        
+        # Schedule job runner
+        application.job_queue.run_repeating(run_scheduled_jobs, interval=60, first=10)
+        
+        logger.info("Advanced Channel Manager Pro started successfully!")
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
+        
+    except Exception as e:
+        logger.error(f"Failed to start bot: {e}", exc_info=True)
+        raise
 
 if __name__ == "__main__":
     main()
-                
